@@ -70,5 +70,5 @@ for region in regions:
     })
 
 df = pd.DataFrame(all_results)
-df.to_csv('youtube_demand_aggregated.csv', index=False)
-print("Data collection completed. Output: youtube_demand_aggregated.csv")
+df.to_csv(f'youtube_demand_{concept}.csv', index=False)
+print(f"Data collection completed. Output: youtube_demand_{concept}.csv")
