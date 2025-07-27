@@ -1,10 +1,8 @@
 from googleapiclient.discovery import build
 import pandas as pd
-import numpy as np
 import time
 
-# API configuration
-DEVELOPER_KEY = 'YOUR_API_KEY'
+DEVELOPER_KEY = 'AIzaSyBrR1-GcfTjcGgfLiW80fqKU9yL5Ba1Q0M'
 YOUTUBE_API_SERVICE_NAME = 'youtube'
 YOUTUBE_API_VERSION = 'v3'
 
@@ -14,19 +12,21 @@ youtube = build(
     developerKey=DEVELOPER_KEY
 )
 
-# Target regions and queries
-regions = ['US', 'JP']
-queries = ['サッカー', 'kpop']
+with open('regions code.txt', 'r', encoding='utf-8') as f:
+    regions = [line.strip() for line in f if line.strip()]
 
-# Store all results
+concept = "soccer"  #representive word
+query_words = ["soccer", "サッカー", "fútbol", "Fußball", "calcio", "futebol", "футбол", "كرة_القدم", "足球", "축구"]  #multiple languages
+
 all_results = []
 
-# Data collection loop
-for query in queries:
-    for region in regions:
-        print(f"Processing: query={query}, region={region}")
+for region in regions:
+    print(f"Processing concept: '{concept}' in region: {region}")
+    total_view = total_like = total_comment = 0
+
+    for query in query_words:
         try:
-            # Search for videos matching the query in the specified region
+
             search_response = youtube.search().list(
                 q=query,
                 part='id',
@@ -36,7 +36,6 @@ for query in queries:
                 order='relevance'
             ).execute()
 
-            # Extract video IDs
             video_ids = [
                 item['id']['videoId']
                 for item in search_response.get('items', [])
@@ -44,42 +43,32 @@ for query in queries:
             ]
 
             if not video_ids:
-                print(f"No videos found for query={query}, region={region}")
                 continue
 
-            # Retrieve video statistics and metadata
             video_response = youtube.videos().list(
-                part='snippet,statistics',
+                part='statistics',
                 id=','.join(video_ids)
             ).execute()
 
             for item in video_response.get('items', []):
                 stats = item.get('statistics', {})
-                snippet = item.get('snippet', {})
-                all_results.append({
-                    'query': query,
-                    'region': region,
-                    'videoId': item['id'],
-                    'title': snippet.get('title'),
-                    'channel': snippet.get('channelTitle'),
-                    'publishedAt': snippet.get('publishedAt'),
-                    'viewCount': int(stats.get('viewCount', 0)),
-                    'likeCount': int(stats.get('likeCount', 0)),
-                    'commentCount': int(stats.get('commentCount', 0))
-                })
+                total_view += int(stats.get('viewCount', 0))
+                total_like += int(stats.get('likeCount', 0))
+                total_comment += int(stats.get('commentCount', 0))
 
-            time.sleep(1)  # Prevent hitting the API quota limit
+            time.sleep(1)
+
         except Exception as e:
-            print(f"Error in query={query}, region={region}: {e}")
+            print(f"Error with query='{query}', region='{region}': {e}")
 
-# Convert to DataFrame and save
+    all_results.append({
+        'concept': concept,
+        'region': region,
+        'viewCount': total_view,
+        'likeCount': total_like,
+        'commentCount': total_comment
+    })
+
 df = pd.DataFrame(all_results)
-df.to_csv('youtube_multiquery_demand_data.csv', index=False)
-
-# Aggregate demand matrix: sum statistics by region and query
-grouped = df.groupby(['region', 'query'])[['viewCount', 'likeCount', 'commentCount']].sum()
-demand_matrix_view = grouped['viewCount'].unstack(fill_value=0)
-
-# Display summary
-print("Data collection and aggregation completed. Sample data:")
-print(df.head())
+df.to_csv('youtube_demand_aggregated.csv', index=False)
+print("Data collection completed. Output: youtube_demand_aggregated.csv")
