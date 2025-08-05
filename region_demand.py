@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 #Slack Webhook
-SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/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"
+SLACK_WEBHOOK_URL = "Slack URL"
 
 def send_slack_message(message):
     try:
@@ -182,4 +182,5 @@ def main():
 #Entry Point
 if __name__ == "__main__":
     main()
+
 
