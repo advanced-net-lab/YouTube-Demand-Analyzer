@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 
 #Constants and Configuration
-DEVELOPER_KEY = 'AIzaSyBrR1-GcfTjcGgfLiW80fqKU9yL5Ba1Q0M' 
+DEVELOPER_KEY = 'Your API KEY' 
 YOUTUBE_API_SERVICE_NAME = 'youtube'
 YOUTUBE_API_VERSION = 'v3'
 
@@ -182,3 +182,4 @@ def main():
 #Entry Point
 if __name__ == "__main__":
     main()
+
