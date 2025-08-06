@@ -1,23 +1,26 @@
-# YouTube-Demand-Analyzer
-This repository contains a Python script that uses the YouTube Data API v3 to collect regional demand data across multiple countries and search queries.
+# YouTube Regional Demand Collector
 
-## Purpose
-
-This tool is used for academic research to analyze cross-cultural demand patterns of online video content. The results are used to create demand vectors for each region, useful in content recommendation and localization studies.
+This Python script collects video demand data from YouTube using the YouTube Data API. It is designed to analyze interest in specific concepts across different countries and languages. The script supports scheduled execution, incremental updates, and Slack notifications for monitoring progress and errors.
 
 ## Features
 
-- Multi-region support (via `regionCode`)
-- Multi-query search
-- Outputs a CSV file with view/like/comment counts
-- API quota-conscious implementation
+- Collects view counts, like counts, and comment counts for each concept
+- Supports multilingual queries to reduce language bias
+- Retrieves data from multiple countries (based on ISO region codes)
+- Tracks approximate API quota usage during execution
+- Logs all execution details to a log file
+- Sends notifications to Slack (start, progress, error, completion)
 
-## Usage
+## Files
 
-1. Replace `YOUR_API_KEY_HERE` with your own YouTube Data API key
-2. Run `youtube_demand_collector.py` with Python 3.x
-3. Output file: `youtube_multiquery_demand_data.csv`
+- `region_demand.py`: Main script for collecting YouTube demand data
+- `concepts.txt`: List of concepts to analyze (one per line)
+- `query_words.json`: Dictionary that maps each concept to a list of translated query words
+- `regions code.txt`: List of target country codes (ISO 3166 format)
+- `last_fetch.json`: Tracks the last fetch date for each concept
+- `log.txt`: Execution logs and error messages
 
+## Requirements
 
-
+Install the required libraries using pip:
 
