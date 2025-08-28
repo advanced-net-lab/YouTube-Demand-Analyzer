@@ -21,6 +21,12 @@ LAST_FETCH_FILE = 'last_fetch.json'
 QUOTA_USAGE_FILE = 'quota_usage.json'
 Quota_Notify_Interval = 100000
 
+#Inspection(verfication) mode flags
+INSPECTION_MODE = True
+INSPECTION_TOP_K = 5
+INSPECTION_DIR = "inspection"
+os.makedirs(INSPECTION_DIR, exist_ok=True)
+
 #Slack Notification
 def send_slack_message(message):
     try:
@@ -43,7 +49,7 @@ def chunked_video_ids(ids, chunk_size = 50):
     for i in range(0, len(ids), chunk_size):
         yield ids[i:i + chunk_size]
 
-### FIXED: Added function to reset quota at Pacific Time day change
+#Function to reset quota at Pacific Time day change
 def reset_quota_if_new_day(quota_usage):
     pacific = pytz.timezone("US/Pacific")
     now_pacific = datetime.datetime.now(pacific)
@@ -92,7 +98,7 @@ def main():
             logging.warning(f"Failed to load quota file: {e}")
             quota_usage = {}
 
-        ### FIXED: Reset quota if day changed
+        #Reset quota if day changed
         quota_day_key, quota_usage = reset_quota_if_new_day(quota_usage)
         total_quota = quota_usage[quota_day_key]
 
@@ -112,9 +118,15 @@ def main():
             logging.info(f"▶ Concept: '{concept}' since {published_after}")
             all_results = []
 
+            #Keep raw candidates per region for inspection
+            inspection_rows = [] #list of dicts
+
             for region in regions:
                 logging.info(f"  → Region: {region}")
                 total_view = total_like = total_comment = 0
+
+                #To track per-region rank position across pages
+                rank_counter = 0
 
                 for query in query_words:
                     next_page_token = None
@@ -137,7 +149,7 @@ def main():
                                 pageToken=next_page_token
                             ).execute()
 
-                            ### FIXED: Quota add only after successful API call
+                            #Quota add only after successful API call
                             total_quota += 100
 
                             video_ids = [
@@ -148,18 +160,44 @@ def main():
 
                             if video_ids:
                                 video_response = youtube.videos().list(
-                                    part='statistics',
+                                    part='statistics,snippet',
                                     id=','.join(video_ids)
                                 ).execute()
 
-                                ### FIXED: Add quota only for actual video IDs fetched
-                                total_quota += len(video_ids)
+                                #Quota only for actual video IDs fetched
+                                total_quota += 1
 
-                                for item in video_response.get('items', []):
-                                    stats = item.get('statistics', {})
-                                    total_view += int(stats.get('viewCount', 0))
-                                    total_like += int(stats.get('likeCount', 0))
-                                    total_comment += int(stats.get('commentCount', 0))
+                                # Aggregate for the original (legacy) totals AND collect rows for inspection
+                                id_to_item = {it['id']: it for it in video_response.get('items', [])}
+                                for vid in video_ids:
+                                    v = id_to_item.get(vid)
+                                    if not v:
+                                        continue
+                                    stats = v.get('statistics', {})
+                                    snip = v.get('snippet', {})
+                                    vc = int(stats.get('viewCount', 0))
+                                    lc = int(stats.get('likeCount', 0)) if 'likeCount' in stats else 0
+                                    cc = int(stats.get('commentCount', 0)) if 'commentCount' in stats else 0
+                                    total_view += vc
+                                    total_like += lc
+                                    total_comment += cc
+
+                                    #Accumulate candidate rows for inspection
+                                    rank_counter += 1
+                                    inspection_rows.append({
+                                        'concept': concept,
+                                        'region': region,
+                                        'query': query,
+                                        'rank': rank_counter,  # global rank within this region+concept run
+                                        'videoId': vid,
+                                        'title': snip.get('title', ''),
+                                        'channelTitle': snip.get('channelTitle', ''),
+                                        'publishedAt': snip.get('publishedAt', ''),
+                                        'viewCount': vc,
+                                        'likeCount': lc,
+                                        'commentCount': cc,
+                                        'url': f"https://www.youtube.com/watch?v={vid}"
+                                    })
 
                             else:
                                 break
@@ -194,6 +232,24 @@ def main():
             df.to_csv(filename, index=False)
             logging.info(f"Saved: {filename}")
             send_slack_message(f"Completed: {concept} has processed({len(query_words)} queries * {len(regions)} regions)")
+
+            #Save inspection top-K per region (optional branch)
+            if INSPECTION_MODE:
+                ins_df = pd.DataFrame(inspection_rows)
+
+                # 去重（同じ地域で同じ動画が複数クエリに出た場合は最大値/最小rank優先）
+                if not ins_df.empty:
+                    # rank最小（上位）を優先、viewCount降順で安定ソート
+                    ins_df = ins_df.sort_values(['region','viewCount','rank'], ascending=[True, False, True])
+                    ins_df = ins_df.drop_duplicates(subset=['region','videoId'], keep='first')
+
+                    # 地域ごとに上位Kを抽出
+                    topk_df = ins_df.groupby('region', group_keys=False).apply(lambda g: g.nlargest(INSPECTION_TOP_K, 'viewCount'))
+
+                    topk_path = os.path.join(INSPECTION_DIR, f"inspection_top{INSPECTION_TOP_K}_{concept}_{timestamp}.csv")
+                    topk_df.to_csv(topk_path, index=False, encoding='utf-8-sig')
+                    logging.info(f"Inspection file saved: {topk_path}")
+                    send_slack_message(f"Inspection Top{INSPECTION_TOP_K} saved for {concept}: {topk_path}")
 
             #Interim Notice
             previous_quota = total_quota - len(query_words) * len(regions) * 150
