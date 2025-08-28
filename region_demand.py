@@ -5,12 +5,23 @@ import os
 import datetime
 import logging
 import requests
+import pytz
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-#Slack Webhook
-SLACK_WEBHOOK_URL = "Slack URL"
+#Configuraiton
+SLACK_WEBHOOK_URL = "Your Slack Webhook"
+DEVELOPER_KEY = 'Your API Key' 
+YOUTUBE_API_SERVICE_NAME = 'youtube'
+YOUTUBE_API_VERSION = 'v3'
+MAX_RESULTS = 50
+MAX_PAGES = 1
+CHUNK_COUNT = 5
+LAST_FETCH_FILE = 'last_fetch.json'
+QUOTA_USAGE_FILE = 'quota_usage.json'
+Quota_Notify_Interval = 100000
 
+#Slack Notification
 def send_slack_message(message):
     try:
         payload = {"text": message}
@@ -28,21 +39,25 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-#Constants and Configuration
-DEVELOPER_KEY = 'Your API KEY' 
-YOUTUBE_API_SERVICE_NAME = 'youtube'
-YOUTUBE_API_VERSION = 'v3'
+def chunked_video_ids(ids, chunk_size = 50):
+    for i in range(0, len(ids), chunk_size):
+        yield ids[i:i + chunk_size]
 
-MAX_RESULTS = 50
-MAX_PAGES = 1
-CHUNK_COUNT = 5
-LAST_FETCH_FILE = 'last_fetch.json'
-Quota_Notify_Interval = 100000
+### FIXED: Added function to reset quota at Pacific Time day change
+def reset_quota_if_new_day(quota_usage):
+    pacific = pytz.timezone("US/Pacific")
+    now_pacific = datetime.datetime.now(pacific)
+    quota_day_key = now_pacific.strftime("%Y-%m-%d")
+    if quota_day_key not in quota_usage:
+        logging.info(f"New Pacific day detected. Resetting quota usage.")
+        quota_usage.clear()
+        quota_usage[quota_day_key] = 0
+    return quota_day_key, quota_usage
 
 #Main Processing Function
 def main():
-    logging.info("Demand Data Conllection Started")
-    send_slack_message("Youtube Demand Data Collection has started")
+    logging.info("Demand Data Collection Started")
+    send_slack_message("YouTube Demand Data Collection has started")
 
     try:
         #Initialize YouTube API
@@ -69,13 +84,24 @@ def main():
         else:
             last_fetch = {}
 
-        #Rotate Concepts Daily Based on Data
+        #Load Quota Usage and reset if new Pacific day
+        try:
+            with open(QUOTA_USAGE_FILE, 'r', encoding='utf-8') as f:
+                quota_usage = json.load(f)
+        except Exception as e:
+            logging.warning(f"Failed to load quota file: {e}")
+            quota_usage = {}
+
+        ### FIXED: Reset quota if day changed
+        quota_day_key, quota_usage = reset_quota_if_new_day(quota_usage)
+        total_quota = quota_usage[quota_day_key]
+
+        #Rotate Concepts Daily
         today = datetime.date.today()
         day_index = today.toordinal() % CHUNK_COUNT
         chunk_size = len(all_concepts) // CHUNK_COUNT + 1
         concepts = all_concepts[day_index * chunk_size : (day_index + 1) * chunk_size]
 
-        total_quota = 0
         concept_counter = 0
 
         for concept in concepts:
@@ -93,6 +119,12 @@ def main():
                 for query in query_words:
                     next_page_token = None
                     for page in range(MAX_PAGES):
+
+                        if total_quota >= 1400000:
+                            send_slack_message("Quota limit reached. Stopping execution.")
+                            logging.warning("Quota limit reached before next request.")
+                            return
+                        
                         try:
                             search_response = youtube.search().list(
                                 q=query,
@@ -104,7 +136,9 @@ def main():
                                 publishedAfter=published_after,
                                 pageToken=next_page_token
                             ).execute()
-                            total_quota += 100 #Quota Consumption of "search.list"
+
+                            ### FIXED: Quota add only after successful API call
+                            total_quota += 100
 
                             video_ids = [
                                 item['id']['videoId']
@@ -112,20 +146,23 @@ def main():
                                 if item['id'].get('kind') == 'youtube#video' and 'videoId' in item['id']
                             ]
 
-                            if not video_ids:
+                            if video_ids:
+                                video_response = youtube.videos().list(
+                                    part='statistics',
+                                    id=','.join(video_ids)
+                                ).execute()
+
+                                ### FIXED: Add quota only for actual video IDs fetched
+                                total_quota += len(video_ids)
+
+                                for item in video_response.get('items', []):
+                                    stats = item.get('statistics', {})
+                                    total_view += int(stats.get('viewCount', 0))
+                                    total_like += int(stats.get('likeCount', 0))
+                                    total_comment += int(stats.get('commentCount', 0))
+
+                            else:
                                 break
-
-                            video_response = youtube.videos().list(
-                                part='statistics',
-                                id=','.join(video_ids)
-                            ).execute()
-                            total_quota += len(video_ids) #1point = 1video Consumption
-
-                            for item in video_response.get('items', []):
-                                stats = item.get('statistics', {})
-                                total_view += int(stats.get('viewCount', 0))
-                                total_like += int(stats.get('likeCount', 0))
-                                total_comment += int(stats.get('commentCount', 0))
 
                             next_page_token = search_response.get('nextPageToken')
                             if not next_page_token:
@@ -134,7 +171,6 @@ def main():
                             time.sleep(1)
 
                         except HttpError as e:
-                            reason = e.error_details[0].get('reason', '') if hasattr(e, 'error_details') else ''
                             if e.resp.status == 403 and "quotaExceeded" in str(e):
                                 send_slack_message("Quota Exceeded! Collection Interrupted")
                                 logging.error("Quota exceeded")
@@ -160,8 +196,13 @@ def main():
             send_slack_message(f"Completed: {concept} has processed({len(query_words)} queries * {len(regions)} regions)")
 
             #Interim Notice
-            if total_quota // Quota_Notify_Interval > (total_quota - len(query_words) * len(regions) * 150) // Quota_Notify_Interval:
-                send_slack_message(f"Quota Usage is about {total_quota:,} / 1000000")
+            previous_quota = total_quota - len(query_words) * len(regions) * 150
+            if total_quota // Quota_Notify_Interval > previous_quota // Quota_Notify_Interval:
+                send_slack_message(f"Quota Usage is about {total_quota:,} / 1,000,000")
+
+            quota_usage[quota_day_key] = total_quota
+            with open(QUOTA_USAGE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(quota_usage, f, ensure_ascii=False, indent=2)
 
             #Update Fetch Timestamp
             now_iso = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -170,17 +211,17 @@ def main():
         #Save Updated Timestamps
         with open(LAST_FETCH_FILE, 'w', encoding='utf-8') as f:
             json.dump(last_fetch, f, ensure_ascii=False, indent=2)
+        quota_usage[quota_day_key] = total_quota
+        with open(QUOTA_USAGE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(quota_usage, f, ensure_ascii=False, indent=2)
 
         logging.info("All concepts processed successfully")
-        send_slack_message(f"Collection Completed. {concept_counter} concepts has processed today. Total Usage is about {total_quota:,}")
+        send_slack_message(f"Collection Completed. {concept_counter} concepts processed today. Total Usage is about {total_quota:,}")
 
     except Exception as e:
         logging.exception(f"Error occurred: {e}")
         send_slack_message(f"Fatal Error:{e}")
 
-
 #Entry Point
 if __name__ == "__main__":
     main()
-
-
