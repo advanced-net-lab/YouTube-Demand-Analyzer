@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import time
 import json
@@ -24,6 +25,9 @@ if not DEVELOPER_KEY:
 
 YOUTUBE_API_SERVICE_NAME = 'youtube'
 YOUTUBE_API_VERSION = 'v3'
+
+# Cooldown Setting
+COOLDOWN_HOURS = 10  # 直近10時間以内なら取得済みのconceptをスキップ
 
 # PARAMETERS
 MAX_RESULTS = 25         # per search / mostPopular fetch
@@ -204,6 +208,9 @@ def parse_args():
     parser.add_argument("--concept", type=str, default=None)
     parser.add_argument("--regions-file", type=str, default=None)
     parser.add_argument("--limit-regions", type=int, default=0)
+    # NEW: cooldown override
+    parser.add_argument("--force", action="store_true",
+                        help="Ignore cooldown and force-run concepts.")
     return parser.parse_args()
 
 def load_last_fetch():
@@ -230,6 +237,10 @@ def main():
 
     last_fetch = load_last_fetch()
     today = datetime.date.today()
+
+    # for cooldown comparison
+    now_utc = datetime.datetime.utcnow()
+    cooldown_delta = datetime.timedelta(hours=COOLDOWN_HOURS)
 
     youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
 
@@ -268,13 +279,25 @@ def main():
         concepts = [args.concept]
 
     for concept in concepts:
+        # NEW: cooldown skip (unless --force)
+        last_time = last_fetch.get(concept)
+        if last_time and not args.force:
+            try:
+                last_dt = datetime.datetime.strptime(last_time, "%Y-%m-%dT%H:%M:%SZ")
+                if (now_utc - last_dt) < cooldown_delta:
+                    msg = (f"Skip concept '{concept}': last fetched at {last_dt} UTC "
+                           f"(within {COOLDOWN_HOURS}h cooldown). Use --force to override.")
+                    logging.info(msg)
+                    send_slack_message(msg)
+                    continue
+            except Exception as e:
+                logging.warning(f"Failed to parse last_fetch for {concept}: {e}")
+
         logging.info(f"Processing concept: {concept}")
         query_words = concept_queries.get(concept, [concept])
-        # DEBUG: print queries used
         logging.info(f"Concept `{concept}` queries: {query_words}")
         print(f"[DEBUG] concept={concept} queries={query_words}")
 
-        last_time = last_fetch.get(concept)
         if last_time:
             published_after = last_time
         else:
@@ -282,16 +305,14 @@ def main():
 
         # collect per-region lists (merged search + mostPopular)
         region_top_lists = {}
-        # keep mapping for debug: region -> {vid: set(sources)}
-        all_region_sources = {}
-
-        # we will collect all trending vids globally for concept to apply trend_boost
-        trending_set = set()
+        all_region_sources = {}  # region -> {vid: set(sources)}
+        trending_set = set()     # for trend_boost
 
         for region in regions:
             logging.info(f" Searching region {region} for concept {concept}")
             vids_ordered = []
-            region_sources = {}  # vid -> set(sources)
+            region_sources = {}
+
             # 1) query-based searches
             for q in query_words:
                 next_page_token = None
@@ -323,7 +344,7 @@ def main():
                         logging.warning(f"Search failed region={region} q={q} : {e}")
                         break
 
-            # 2) mostPopular fetch for this region (trending) -> collect trending_set, append (do not insert)
+            # 2) mostPopular fetch for this region (trending)
             try:
                 def do_mostpopular():
                     return youtube.videos().list(
